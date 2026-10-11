@@ -1,13 +1,15 @@
 """Engine layer: pricing models that turn a MarketData into prices and risk numbers.
 
-Contains BlackScholesEngine (closed-form European options).
-MonteCarloEngine will be added here in a later phase.
+Contains:
+    BlackScholesEngine : closed-form European options
+    MonteCarloEngine   : simulated price paths (Asian pricing is added in a later phase)
 """
 
 from __future__ import annotations
 
 import math
 
+import numpy as np
 from scipy.stats import norm
 
 from energy_quant_engine.market_data import MarketData
@@ -19,6 +21,16 @@ def _check_option_type(option_type: str) -> None:
     """Raise if option_type is not exactly 'call' or 'put'."""
     if option_type not in _VALID_OPTION_TYPES:
         raise ValueError(f"option_type must be 'call' or 'put', got {option_type!r}")
+
+
+def _check_positive_int(name: str, value: object) -> int:
+    """Return `value` as a plain int, or raise if it is not a positive whole number."""
+    # bool is a subclass of int, so True would otherwise pass as 1.
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer, got {type(value).__name__}")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive, got {value}")
+    return int(value)
 
 
 class BlackScholesEngine:
@@ -78,3 +90,50 @@ class BlackScholesEngine:
             "vega": float(vega),
             "theta": float(theta),
         }
+
+
+class MonteCarloEngine:
+    """Monte Carlo engine: simulates asset price paths under risk-neutral GBM.
+
+    Each step multiplies the price by exp((r - sigma^2/2)*dt + sigma*sqrt(dt)*Z),
+    where Z is a fresh standard normal draw.
+    """
+
+    # Paths are generated this many at a time so the temporary random-number
+    # arrays stay small (about 20 MB) instead of doubling memory use.
+    _CHUNK_SIZE = 10_000
+
+    def __init__(self, market: MarketData, seed: int | None = None) -> None:
+        self.market = market
+        # One random generator per engine. Passing the same seed reproduces
+        # exactly the same paths; seed=None gives different paths every run.
+        self._rng = np.random.default_rng(seed)
+
+    def simulate_paths(self, n_sims: int = 100_000, n_steps: int = 252) -> np.ndarray:
+        """Simulate GBM price paths.
+
+        Returns an array of shape (n_sims, n_steps + 1):
+            * each ROW is one simulated path
+            * column 0 is the starting spot price S (time 0)
+            * column j is the price after j time steps (column n_steps is expiry)
+        """
+        n_sims = _check_positive_int("n_sims", n_sims)
+        n_steps = _check_positive_int("n_steps", n_steps)
+        m = self.market
+
+        dt = m.T / n_steps                          # length of one step, in years
+        drift = (m.r - 0.5 * m.sigma**2) * dt       # deterministic part of each step
+        vol = m.sigma * math.sqrt(dt)               # scale of the random part
+
+        paths = np.empty((n_sims, n_steps + 1))
+        paths[:, 0] = m.S
+
+        for start in range(0, n_sims, self._CHUNK_SIZE):
+            stop = min(start + self._CHUNK_SIZE, n_sims)
+            z = self._rng.standard_normal((stop - start, n_steps))  # the Z's
+            log_returns = drift + vol * z                           # one per step
+            # cumsum adds up the log-returns along each path, and exp turns the
+            # running total back into a price multiplier relative to S.
+            paths[start:stop, 1:] = m.S * np.exp(np.cumsum(log_returns, axis=1))
+
+        return paths
