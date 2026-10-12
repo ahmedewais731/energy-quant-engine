@@ -2,7 +2,7 @@
 
 Contains:
     BlackScholesEngine : closed-form European options
-    MonteCarloEngine   : simulated price paths (Asian pricing is added in a later phase)
+    MonteCarloEngine   : simulated price paths and arithmetic-average Asian options
 """
 
 from __future__ import annotations
@@ -137,3 +137,37 @@ class MonteCarloEngine:
             paths[start:stop, 1:] = m.S * np.exp(np.cumsum(log_returns, axis=1))
 
         return paths
+
+    def price_asian_option(
+        self,
+        option_type: str = "call",
+        n_sims: int = 100_000,
+        n_steps: int = 252,
+    ) -> tuple[float, float]:
+        """Price an arithmetic-average Asian option (fixed strike) by Monte Carlo.
+
+        The average is taken over the n_steps monitoring dates after time 0
+        (the starting price S is not part of the average).
+
+        Returns (price, standard_error). The standard error is on the same
+        scale as the price (i.e. it is discounted too).
+        """
+        _check_option_type(option_type)
+        n_sims = _check_positive_int("n_sims", n_sims)
+        if n_sims < 2:
+            raise ValueError("n_sims must be at least 2 to estimate a standard error")
+        m = self.market
+
+        paths = self.simulate_paths(n_sims, n_steps)
+        average = paths[:, 1:].mean(axis=1)  # one arithmetic average per path
+
+        if option_type == "call":
+            payoff = np.maximum(average - m.K, 0.0)
+        else:
+            payoff = np.maximum(m.K - average, 0.0)
+
+        discount = math.exp(-m.r * m.T)
+        price = discount * payoff.mean()
+        # Standard error of a sample mean: std of the samples / sqrt(count).
+        std_error = discount * payoff.std(ddof=1) / math.sqrt(n_sims)
+        return float(price), float(std_error)
