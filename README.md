@@ -15,7 +15,7 @@ The worked example is a BRENT_CRUDE option (spot 80, strike 85, six months to ex
 ## Installation
 
 ```bash
-git clone https://github.com/<your-username>/energy-quant-engine.git
+git clone https://github.com/<ahmedewais731>/energy-quant-engine.git
 cd energy-quant-engine
 pip install -r requirements.txt
 ```
