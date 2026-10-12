@@ -1,6 +1,13 @@
-"""Analytics layer: Greeks table, Monte Carlo convergence plots, and (later) the runnable script."""
+"""Analytics layer: Greeks table, Monte Carlo convergence plots, and the runnable script.
+
+Run the example from the repository root (the folder CONTAINING energy_quant_engine/):
+
+    python -m energy_quant_engine.main_analytics
+"""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -129,3 +136,44 @@ class ScenarioAnalytics:
         if save_path is not None:
             fig.savefig(save_path, dpi=150, bbox_inches="tight")
         return fig
+
+
+def main(output_dir: str = "output", n_sims: int = 100_000) -> None:
+    """Run the BRENT_CRUDE example: print the results and save the plots."""
+    market = MarketData(S=80.0, K=85.0, T=0.5, r=0.04, sigma=0.35, asset_name="BRENT_CRUDE")
+    analytics = ScenarioAnalytics(market, seed=42)  # fixed seed -> repeatable results
+    black_scholes = BlackScholesEngine(market)
+    monte_carlo = MonteCarloEngine(market, seed=42)
+
+    print(f"=== {market.asset_name} ===")
+    print(
+        f"S={market.S:g}  K={market.K:g}  T={market.T:g} years  "
+        f"r={market.r:.2%}  sigma={market.sigma:.2%}"
+    )
+
+    print("\nEuropean option: Black-Scholes price and Greeks")
+    table = analytics.generate_greeks_table()
+    print(table.to_string(float_format=lambda x: f"{x:10.4f}"))
+    print("(vega is per 1.00 change in sigma; theta is per year)")
+
+    print(f"\nAsian option (arithmetic average): Monte Carlo, {n_sims:,} paths")
+    for option_type in ("call", "put"):
+        price, std_error = monte_carlo.price_asian_option(option_type, n_sims=n_sims)
+        european = black_scholes.price(option_type)
+        print(
+            f"  {option_type:<4}  price = {price:.4f} +/- {std_error:.4f}"
+            f"   (European {option_type}: {european:.4f})"
+        )
+
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    print(f"\nSaving plots to {out_path}/ ...")
+    for option_type in ("call", "put"):
+        file = out_path / f"mc_convergence_{option_type}.png"
+        fig = analytics.plot_mc_convergence(option_type, n_sims=n_sims, save_path=str(file))
+        plt.close(fig)  # free the figure's memory
+        print(f"  saved {file}")
+
+
+if __name__ == "__main__":
+    main()
