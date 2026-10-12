@@ -7,6 +7,7 @@ Run the example from the repository root (the folder CONTAINING energy_quant_eng
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -14,6 +15,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 
 from energy_quant_engine.market_data import MarketData
 from energy_quant_engine.pricing_engines import (
@@ -51,6 +53,18 @@ def running_estimates(values: np.ndarray, n_points: int = 200) -> pd.DataFrame:
     std_error = np.sqrt(variance / counts)
 
     return pd.DataFrame({"n_sims": counts, "price": mean, "std_error": std_error})
+
+
+def stress_pnl_grid(table: pd.DataFrame) -> pd.DataFrame:
+    """Reshape ScenarioAnalytics.stress_test output into a labelled P&L grid.
+
+    Rows are spot shocks (e.g. '-20%'), columns are volatility shocks in
+    percentage points (e.g. '+10 pts'), and each cell is the P&L vs today.
+    """
+    grid = table.pivot(index="spot_shock", columns="vol_shock", values="pnl")
+    grid.index = [f"{x:+.0%}" for x in grid.index]
+    grid.columns = [f"{x * 100:+.0f} pts" for x in grid.columns]
+    return grid
 
 
 class ScenarioAnalytics:
@@ -137,6 +151,126 @@ class ScenarioAnalytics:
             fig.savefig(save_path, dpi=150, bbox_inches="tight")
         return fig
 
+    def stress_test(
+        self,
+        option_type: str = "call",
+        spot_shocks: tuple[float, ...] = (-0.20, -0.10, 0.0, 0.10, 0.20),
+        vol_shocks: tuple[float, ...] = (-0.10, 0.0, 0.10, 0.20),
+    ) -> pd.DataFrame:
+        """Re-price a European option after shocking spot and volatility.
+
+        spot_shocks are RELATIVE moves (-0.20 = spot falls 20%).
+        vol_shocks are ABSOLUTE moves in volatility (+0.10 = ten percentage
+        points, so 35% vol becomes 45%).
+
+        Returns one row per (spot shock, vol shock) pair with columns:
+        spot_shock, vol_shock, spot, sigma, price, pnl (price minus today's price).
+        """
+        _check_option_type(option_type)
+        base_price = self._bs.price(option_type)
+        m = self.market
+
+        rows = []
+        for spot_shock in spot_shocks:
+            for vol_shock in vol_shocks:
+                # replace() makes a modified COPY of the frozen MarketData
+                # (and re-runs its validation, so impossible shocks raise errors).
+                shocked = replace(m, S=m.S * (1 + spot_shock), sigma=m.sigma + vol_shock)
+                price = BlackScholesEngine(shocked).price(option_type)
+                rows.append(
+                    {
+                        "spot_shock": spot_shock,
+                        "vol_shock": vol_shock,
+                        "spot": shocked.S,
+                        "sigma": shocked.sigma,
+                        "price": price,
+                        "pnl": price - base_price,
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    def price_surface(
+        self,
+        option_type: str = "call",
+        spot_range: tuple[float, float] = (0.7, 1.3),
+        vol_range: tuple[float, float] = (0.5, 1.5),
+        n_spot: int = 9,
+        n_vol: int = 7,
+    ) -> pd.DataFrame:
+        """European option price over a grid of spot and volatility values.
+
+        spot_range and vol_range are MULTIPLES of today's spot and volatility
+        (0.7 to 1.3 means 70% to 130% of today's value).
+
+        Returns a DataFrame: rows are volatilities, columns are spot prices.
+        """
+        _check_option_type(option_type)
+        if n_spot < 2 or n_vol < 2:
+            raise ValueError("n_spot and n_vol must each be at least 2")
+        m = self.market
+
+        spots = np.linspace(*spot_range, n_spot) * m.S
+        vols = np.linspace(*vol_range, n_vol) * m.sigma
+        grid = [
+            [BlackScholesEngine(replace(m, S=s, sigma=v)).price(option_type) for s in spots]
+            for v in vols
+        ]
+        surface = pd.DataFrame(grid, index=vols, columns=spots)
+        surface.index.name = "sigma"
+        surface.columns.name = "spot"
+        return surface
+
+    def plot_stress_test(self, save_path: str | None = None) -> Figure:
+        """Heatmaps of call and put P&L under the default spot/volatility shocks."""
+        with sns.axes_style("white"):
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+        for ax, option_type in zip(axes, ("call", "put")):
+            grid = stress_pnl_grid(self.stress_test(option_type))
+            sns.heatmap(
+                grid, annot=True, fmt="+.2f", cmap="RdYlGn", center=0, ax=ax,
+                cbar_kws={"label": "P&L vs today's price"},
+            )
+            ax.set_title(f"{self.market.asset_name} European {option_type}: P&L under stress")
+            ax.set_xlabel("Volatility shock")
+            ax.set_ylabel("Spot shock")
+
+        fig.tight_layout()
+        if save_path is not None:
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        return fig
+
+    def plot_price_surface(self, save_path: str | None = None) -> Figure:
+        """Heatmaps of call and put price across spot and volatility.
+
+        The cell outlined in black is today's market (current spot and volatility).
+        """
+        m = self.market
+        with sns.axes_style("white"):
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+        for ax, option_type in zip(axes, ("call", "put")):
+            surface = self.price_surface(option_type).iloc[::-1]  # high vol at the top
+            col = int(np.argmin(np.abs(surface.columns.to_numpy() - m.S)))
+            row = int(np.argmin(np.abs(surface.index.to_numpy() - m.sigma)))
+
+            labelled = surface.copy()
+            labelled.index = [f"{v:.0%}" for v in surface.index]
+            labelled.columns = [f"{s:.0f}" for s in surface.columns]
+            sns.heatmap(
+                labelled, annot=True, fmt=".1f", cmap="viridis", ax=ax,
+                cbar_kws={"label": "Option price"},
+            )
+            ax.add_patch(Rectangle((col, row), 1, 1, fill=False, edgecolor="black", linewidth=2.5))
+            ax.set_title(f"{m.asset_name} European {option_type}: price by spot and volatility")
+            ax.set_xlabel("Spot price")
+            ax.set_ylabel("Volatility")
+
+        fig.tight_layout()
+        if save_path is not None:
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        return fig
+
 
 def main(output_dir: str = "output", n_sims: int = 100_000) -> None:
     """Run the BRENT_CRUDE example: print the results and save the plots."""
@@ -165,6 +299,13 @@ def main(output_dir: str = "output", n_sims: int = 100_000) -> None:
             f"   (European {option_type}: {european:.4f})"
         )
 
+    print("\nStress test: change in European option price vs today")
+    print("(rows = spot shock, columns = volatility shock)")
+    for option_type in ("call", "put"):
+        grid = stress_pnl_grid(analytics.stress_test(option_type))
+        print(f"\n  {option_type}:")
+        print(grid.to_string(float_format=lambda x: f"{x:+8.2f}"))
+
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     print(f"\nSaving plots to {out_path}/ ...")
@@ -172,6 +313,14 @@ def main(output_dir: str = "output", n_sims: int = 100_000) -> None:
         file = out_path / f"mc_convergence_{option_type}.png"
         fig = analytics.plot_mc_convergence(option_type, n_sims=n_sims, save_path=str(file))
         plt.close(fig)  # free the figure's memory
+        print(f"  saved {file}")
+
+    for name, make_figure in (
+        ("stress_test.png", analytics.plot_stress_test),
+        ("price_surface.png", analytics.plot_price_surface),
+    ):
+        file = out_path / name
+        plt.close(make_figure(save_path=str(file)))
         print(f"  saved {file}")
 
 

@@ -20,6 +20,6 @@ def test_main_prints_results_and_saves_plots():
     text = buffer.getvalue()
 
     assert "BRENT_CRUDE" in text
-    assert "Black-Scholes" in text and "Monte Carlo" in text
-    for option_type in ("call", "put"):
-        assert os.path.getsize(os.path.join(out_dir, f"mc_convergence_{option_type}.png")) > 10_000
+    assert "Black-Scholes" in text and "Monte Carlo" in text and "Stress test" in text
+    for name in ("mc_convergence_call.png", "mc_convergence_put.png", "stress_test.png", "price_surface.png"):
+        assert os.path.getsize(os.path.join(out_dir, name)) > 10_000
